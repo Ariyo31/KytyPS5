@@ -39055,6 +39055,51 @@ void CheckWave64WholeWaveResults() {
           "emulated halves repeated the first-active-lane broadcast");
 }
 
+// Regression probe for #1072: one lane's GLC atomic return must be
+// visible through LDS to both halves of a wave64 after S_BARRIER.
+TestCase Wave64BufferAtomicReturnLdsBroadcast(u32 producer_lane) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = producer_lane == 0 ? "Wave64AtomicLdsBroadcastLane0"
+                                 : "Wave64AtomicLdsBroadcastLane32";
+  auto &code = test.code;
+
+  AppendVMovU32(&code, 20, 0); // Counter address in the output buffer.
+  AppendVMovU32(&code, 2, 0);  // LDS byte address.
+  AppendVMovU32(&code, 1, 1);  // Atomic increment.
+  code.push_back(EncodeSop1(0x04, 10, 126)); // Save EXEC.
+  code.push_back(EncodeVopc(0xc2, InlineU32(producer_lane), 0));
+  code.push_back(EncodeSop1(0x04, 126, 106)); // Only the producer lane.
+  AppendBufferStoreOpcode(&code, 0x32, 1, 20, true);
+  code.push_back(EncodeSopp(0x0c, 0)); // Wait for the returned value.
+  code.push_back(EncodeDs0(0x0d));    // LDS[0] = old counter value.
+  code.push_back(EncodeDs1(0, 1, 2));
+  code.push_back(EncodeSop1(0x04, 126, 10)); // Restore EXEC.
+  code.push_back(EncodeSopp(0x0a, 0));       // S_BARRIER.
+  code.push_back(EncodeDs0(0x36));           // Read LDS[0] in every lane.
+  code.push_back(EncodeDs1(3, 0, 2));
+  AppendStoreVgprAtLaneDwordOffset(&code, 3, 0, 1);
+  AppendEnd(&code);
+
+  test.initial.assign(65, 0);
+  test.initial[0] = 10;
+  test.expected.assign(65, 10);
+  test.expected[0] = 11;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::V_CMP_EQ_U32,
+                  O::BUFFER_ATOMIC_ADD, O::S_WAITCNT, O::DS_WRITE_B32,
+                  O::S_BARRIER, O::DS_READ_B32, O::V_ADD_NC_U32,
+                  O::V_LSHLREV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpAtomicIAdd", "OpControlBarrier"};
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = 64;
+  test.compute_info.lds_size_dwords = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase Wave64RawMasksAndScalarBranch() {
   using O = ShaderOpcode;
   std::vector<u32> code;
@@ -47401,6 +47446,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(DsBpermuteCapturedExecOffsetAndWrap);
   AddCase(DsBpermuteWave64UsesIndependentHalves);
   AddCase(Wave64CrossHalfLaneAndLds);
+  cases.push_back(Wave64BufferAtomicReturnLdsBroadcast(0));
+  cases.push_back(Wave64BufferAtomicReturnLdsBroadcast(32));
   AddCase(Wave64RawMasksAndScalarBranch);
   AddCase(Wave64PartialMultidimensionalWorkgroup);
   AddCase(Wave64AppendConsumeHighHalf);
@@ -54031,6 +54078,8 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, DsPermuteWave64UsesIndependentHalves());
     RunCase(&vulkan, DsBpermuteWave64UsesIndependentHalves());
     RunCase(&vulkan, Wave64CrossHalfLaneAndLds());
+    RunCase(&vulkan, Wave64BufferAtomicReturnLdsBroadcast(0));
+    RunCase(&vulkan, Wave64BufferAtomicReturnLdsBroadcast(32));
     RunCase(&vulkan, Wave64RawMasksAndScalarBranch());
     RunCase(&vulkan, Wave64PartialMultidimensionalWorkgroup());
     RunCase(&vulkan, Wave64AppendConsumeHighHalf());
